@@ -482,6 +482,13 @@ def test_config_persists_across_app_restart(env):
     assert loaded["allow_delete_source"] is True
 
 
+def test_health_reports_version(env):
+    client: TestClient = env["client"]
+    payload = client.get("/api/health").json()
+    assert payload["status"] == "ok"
+    assert payload["version"] == "1.0.0"
+
+
 def test_index_html_is_not_cached(env):
     client: TestClient = env["client"]
     response = client.get("/")

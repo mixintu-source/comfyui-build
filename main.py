@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 import db
 import settings
+import version
 from routers import analyze, config, logs, migrate, models, stats, upload, workflows
 from services.paths import to_posix_path
 
@@ -19,7 +20,7 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
     app = FastAPI(
         title="ComfyUI 模型迁移管理",
         description="解析工作流引用、分析共享模型、原子迁移到目标目录。",
-        version="1.0.0",
+        version=version.__version__,
     )
     app.include_router(config.router)
     app.include_router(stats.router)
@@ -41,7 +42,11 @@ def create_app(data_dir: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict:
-        return {"status": "ok", "data_dir": to_posix_path(settings.data_dir())}
+        return {
+            "status": "ok",
+            "version": version.__version__,
+            "data_dir": to_posix_path(settings.data_dir()),
+        }
 
     dist = settings.web_dist()
     if (dist / "index.html").is_file():

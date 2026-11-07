@@ -18,6 +18,27 @@
 
 更多界面：[路径配置](docs/screenshots/paths.png) · [扫描预览](docs/screenshots/paths-scan.png) · [模型文件树](docs/screenshots/models.png) · [模型迁移弹窗](docs/screenshots/models-migrate.png) · [覆盖风险确认](docs/screenshots/overwrite.png) · [迁移进度](docs/screenshots/progress.png) · [工作流树](docs/screenshots/workflows.png) · [共享模型确认](docs/screenshots/migrate-modal.png) · [迁移结果](docs/screenshots/migrate-result.png) · [日志](docs/screenshots/logs.png)
 
+## V1.0 Windows 便携版
+
+发布包：[ComfyUI-Model-Migrator-v1.0.0-Windows-x64.zip](release/ComfyUI-Model-Migrator-v1.0.0-Windows-x64.zip)
+
+- Windows 10/11 64 位，内置 Python 运行时，**无需安装 Python / Node.js / 数据库**。
+- 解压后双击 `启动.cmd`（或 `Start-Portable.cmd`），浏览器自动打开。
+- 数据保存在启动脚本同级 `data/` 目录，备份该目录即可。
+- 使用说明：[USER-GUIDE.txt](packaging/USER-GUIDE.txt)
+- 变更记录：[CHANGELOG.md](CHANGELOG.md)
+- 校验和：[SHA256SUMS.txt](release/SHA256SUMS.txt)
+
+重新构建：
+
+```powershell
+cd web; pnpm build; cd ..
+.\packaging\prepare-runtime.ps1
+.\packaging\build-portable.ps1 -Version 1.0.0
+```
+
+> 便携版使用 Python 官方签名的嵌入式运行时，不会遇到未签名 exe 被 Smart App Control 直接拦截的问题。
+
 设计细节：
 
 - 工作流既支持 ComfyUI **UI 图格式**（`nodes` / `widgets_values`），也支持 **API 格式**（`{ "3": { "inputs": ... } }`）。
@@ -149,7 +170,7 @@ SQLite (data/app.db) + JSON 配置 (data/config.json)
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-63 个测试，覆盖：路径规范化、配置校验与持久化、空间预检、引用提取（含 subgraph）、引用解析、路径安全与原子复制、源 + 目标清单与工作流引用数、目录分组、目标位置勾选、同名冲突/覆盖、快速指纹、批量迁移、跨根复制、剪贴门控、异步任务进度/完成/取消、复制取消清理、绝对路径/扫描导入、工作流修改时间/打开目录/删除本地 JSON、入口页缓存、迁移跳过/覆盖、HTTP 全流程。
+64 个测试，覆盖：路径规范化、配置校验与持久化、空间预检、引用提取（含 subgraph）、引用解析、路径安全与原子复制、源 + 目标清单与工作流引用数、目录分组、目标位置勾选、同名冲突/覆盖、快速指纹、批量迁移、跨根复制、剪贴门控、异步任务进度/完成/取消、复制取消清理、绝对路径/扫描导入、工作流修改时间/打开目录/删除本地 JSON、入口页缓存、迁移跳过/覆盖、HTTP 全流程。
 
 ## 目录
 

@@ -6,6 +6,15 @@ __pycache__/
 data/
 demo/
 .tmp/
+build/
+dist/
+release/
+release-test*/
+build-release.log
+build-portable.log
+packaging/runtime/
+packaging/py-libs/
+packaging/python-embed.zip
 
 web/node_modules/
 web/dist/

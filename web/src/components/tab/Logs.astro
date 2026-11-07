@@ -1,0 +1,199 @@
+---
+---
+
+<section class="tab-panel hidden" data-panel="logs">
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+      <h2 style="margin:0">迁移日志</h2>
+      <span class="muted mono" id="logCount"></span>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+      <select id="logFilter" style="width:auto;min-width:120px">
+        <option value="">全部状态</option>
+        <option value="success">成功</option>
+        <option value="failed">失败</option>
+        <option value="pending">等待中</option>
+      </select>
+      <button id="refreshLogs" class="ghost small" type="button">刷新</button>
+      <button id="clearLogs" class="danger small" type="button">清空日志</button>
+    </div>
+    <table class="logs-table">
+      <colgroup>
+        <col style="width: 145px" />
+        <col style="width: 16%" />
+        <col style="width: 21%" />
+        <col style="width: 21%" />
+        <col style="width: 64px" />
+        <col style="width: 17%" />
+        <col style="width: 76px" />
+      </colgroup>
+      <thead>
+        <tr>
+          <th>时间</th>
+          <th>相对路径</th>
+          <th>源</th>
+          <th>目标</th>
+          <th>状态</th>
+          <th>信息</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody id="logBody">
+        <tr><td colspan="7" class="empty">加载中…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<script>
+  import {
+    api,
+    basename,
+    byId,
+    copyText,
+    escapeHtml,
+    openOverlay,
+    statusBadge,
+    toast,
+  } from "../../lib/ui";
+
+  const tbody = byId("logBody");
+  const count = byId("logCount");
+  const filter = byId<HTMLSelectElement>("logFilter");
+
+  async function load() {
+    try {
+      const status = filter.value;
+      const logs = await api<any[]>(
+        `/api/logs?status=${encodeURIComponent(status)}`,
+      );
+      count.textContent = `共 ${logs.length} 条`;
+      if (!logs.length) {
+        tbody.innerHTML = '<tr><td colspan="7" class="empty">暂无日志</td></tr>';
+        return;
+      }
+      tbody.innerHTML = logs
+        .map(
+          (log: any) => `
+          <tr>
+            <td class="mono muted nowrap">${escapeHtml(log.ts)}</td>
+            <td class="mono truncate" title="${escapeHtml(log.rel_path)}">${escapeHtml(basename(
+              log.rel_path,
+            ))}</td>
+            <td class="mono muted truncate" title="${escapeHtml(log.src_path)}" data-copy="${escapeHtml(log.src_path)}">
+              <span class="copy-name">${escapeHtml(log.src_path || "—")}</span>
+            </td>
+            <td class="mono muted truncate" title="${escapeHtml(log.dst_path)}" data-copy="${escapeHtml(log.dst_path)}">
+              <span class="copy-name">${escapeHtml(log.dst_path || " —")}</span>
+            </td>
+            <td>${statusBadge(log.status)}</td>
+            <td class="muted" style="font-size:10px">${escapeHtml(log.message)}</td>
+            <td><button class="danger small" type="button" data-id="${log.id}">删除</button></td>
+          </tr>`,
+        )
+        .join("");
+    } catch (error) {
+      tbody.innerHTML = `<tr><td colspan="7" class="empty">${escapeHtml(
+        (error as Error).message,
+      )}</td></tr>`;
+    }
+  }
+
+  tbody.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement;
+    const button = target.closest<HTMLButtonElement>("button[data-id]");
+    if (button) {
+      deleteLog(button.dataset.id!);
+      return;
+    }
+    const cell = target.closest<HTMLElement>("[data-copy]");
+    if (!cell) return;
+    const value = cell.dataset.copy || "";
+    if (!value) return;
+    void copyText(value).then((ok) => {
+      if (ok) {
+        toast(`已复制：${value}`);
+        return;
+      }
+      const { root } = openOverlay(`
+        <h3>复制失败</h3>
+        <p class="hint">浏览器未授予剪贴板权限，请手动复制：</p>
+        <input class="mono" readonly value="${escapeHtml(value)}" style="width:100%" />
+      `);
+      const input = root.querySelector<HTMLInputElement>("input");
+      input?.select();
+    });
+  });
+
+  function deleteLog(id: string) {
+    const { root, close } = openOverlay(`
+      <h3>删除日志</h3>
+      <p class="hint">确定删除这条迁移记录？此操作不可恢复。</p>
+      <div class="actions">
+        <button class="ghost" type="button" data-action="cancel">取消</button>
+        <button class="danger" type="button" data-action="delete">删除</button>
+      </div>
+    `);
+    root
+      .querySelector('[data-action="cancel"]')!
+      .addEventListener("click", close);
+    root
+      .querySelector('[data-action="delete"]')!
+      .addEventListener("click", async () => {
+        try {
+          await api(`/api/logs/${id}`, { method: "DELETE" });
+          close();
+          await load();
+          toast("日志已删除");
+        } catch (error) {
+          toast((error as Error).message, "fail");
+        }
+      });
+  }
+
+  filter.addEventListener("change", () => {
+    void load();
+  });
+  byId("refreshLogs").addEventListener("click", () => {
+    void load();
+  });
+  byId("clearLogs").addEventListener("click", () => {
+    const label = filter.value ? "当前筛选的" : "全部";
+    const { root, close } = openOverlay(`
+      <h3>清空日志</h3>
+      <p class="hint">确定清空${label}迁移日志？此操作不可恢复。</p>
+      <div class="actions">
+        <button class="ghost" type="button" data-action="cancel">取消</button>
+        <button class="danger" type="button" data-action="clear">清空</button>
+      </div>
+    `);
+    root
+      .querySelector('[data-action="cancel"]')!
+      .addEventListener("click", close);
+    root
+      .querySelector('[data-action="clear"]')!
+      .addEventListener("click", async () => {
+        try {
+          await api(`/api/logs?status=${encodeURIComponent(filter.value)}`, {
+            method: "DELETE",
+          });
+          close();
+          await load();
+          toast("日志已清空");
+        } catch (error) {
+          toast((error as Error).message, "fail");
+        }
+      });
+  });
+
+  document.addEventListener("tab:activated", (event) => {
+    if ((event as CustomEvent<{ id: string }>).detail.id === "logs") {
+      void load();
+    }
+  });
+  document.addEventListener("migrations:changed", () => {
+    void load();
+  });
+
+  void load();
+</script>

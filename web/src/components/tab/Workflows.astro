@@ -1,0 +1,687 @@
+---
+---
+
+<section class="tab-panel hidden" data-panel="workflows">
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+      <h2 style="margin:0">工作流列表（点击行展开模型树）</h2>
+      <div style="display:flex;gap:10px;align-items:center">
+        <button id="toggleWorkflowRows" class="ghost small" type="button">展开全部</button>
+        <button id="refreshWf" class="ghost small" type="button">刷新</button>
+      </div>
+    </div>
+    <div class="toolbar" style="margin-bottom:12px">
+      <div class="search-box">
+        <input id="wfSearch" type="text" placeholder="搜索工作流 / 模型 / 目录" />
+        <button id="clearWfSearch" class="search-clear hidden" type="button" title="清空搜索" aria-label="清空搜索">×</button>
+      </div>
+      <span class="muted mono" id="wfCount" style="margin-left:auto"></span>
+    </div>
+    <table class="wf-table">
+      <thead>
+        <tr>
+          <th style="width:24px"></th>
+          <th>工作流名称</th>
+          <th style="width:72px">模型数</th>
+          <th style="width:160px">修改时间</th>
+          <th style="width:140px">操作</th>
+        </tr>
+      </thead>
+      <tbody id="wfBody">
+        <tr><td colspan="5" class="empty">加载中…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<script>
+  import {
+    api,
+    byId,
+    escapeHtml,
+    fmtBytes,
+    fmtFileSize,
+    openOverlay,
+    runMigrationTask,
+    showTab,
+    statusBadge,
+    toast,
+  } from "../../lib/ui";
+
+  const tbody = byId("wfBody");
+  const count = byId("wfCount");
+  const search = byId<HTMLInputElement>("wfSearch");
+  const clearSearch = byId<HTMLButtonElement>("clearWfSearch");
+  const toggleButton = byId<HTMLButtonElement>("toggleWorkflowRows");
+  let allWorkflows: any[] = [];
+  let config: any = null;
+  let allowDelete = false;
+
+  async function loadConfig() {
+    try {
+      config = await api("/api/config");
+      allowDelete = Boolean(config.allow_delete_source);
+    } catch {
+      config = null;
+      allowDelete = false;
+    }
+  }
+
+  async function load() {
+    try {
+      await loadConfig();
+      allWorkflows = await api<any[]>("/api/workflows");
+      renderList();
+    } catch (error) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">${escapeHtml(
+        (error as Error).message,
+      )}</td></tr>`;
+    }
+  }
+
+  function syncClearButton() {
+    clearSearch.classList.toggle("hidden", search.value.length === 0);
+  }
+
+  function modelMatches(model: any, query: string): boolean {
+    if (!query) return true;
+    const rel = String(model.rel_path || "").toLowerCase();
+    const name = rel.split("/").pop() || "";
+    const folder = rel.split("/").slice(1, -1).join("/");
+    return (
+      rel.includes(query) ||
+      name.includes(query) ||
+      folder.includes(query) ||
+      String(model.name || "").toLowerCase().includes(query)
+    );
+  }
+
+  function workflowMatches(workflow: any, query: string): boolean {
+    if (!query) return true;
+    if (String(workflow.name || "").toLowerCase().includes(query)) return true;
+    return (workflow.models || []).some((model: any) =>
+      modelMatches(model, query),
+    );
+  }
+
+  function renderList() {
+    const query = search.value.trim().toLowerCase();
+    const filtered = allWorkflows.filter((workflow) =>
+      workflowMatches(workflow, query),
+    );
+    count.textContent = query
+      ? `共 ${filtered.length} / ${allWorkflows.length} 个工作流`
+      : `共 ${allWorkflows.length} 个工作流`;
+
+    if (!filtered.length) {
+      tbody.innerHTML =
+        '<tr><td colspan="5" class="empty">没有匹配的工作流</td></tr>';
+      syncWorkflowExpandButton();
+      return;
+    }
+
+    tbody.innerHTML = filtered
+      .map((workflow: any) => {
+        const detailId = `wf-detail-${workflow.id}`;
+        const modelCount = workflow.models?.length ?? 0;
+        const nameMatches = !query || workflow.name.toLowerCase().includes(query);
+        return `
+          <tr class="wf-row" data-target="${detailId}">
+            <td><span class="caret">▶</span></td>
+            <td><b>${escapeHtml(workflow.name)}</b></td>
+            <td class="mono">${modelCount}</td>
+            <td class="muted mono">${escapeHtml(
+              workflow.modified_at || "文件缺失",
+            )}</td>
+            <td style="white-space:nowrap">
+              <button class="ghost small open-btn" type="button"
+                data-id="${workflow.id}">打开</button>
+              <button class="danger small delete-btn" type="button"
+                data-id="${workflow.id}"
+                data-name="${escapeHtml(workflow.name)}">删除</button>
+            </td>
+          </tr>
+          <tr class="hidden" id="${detailId}">
+            <td colspan="5" style="padding:0">${renderTree(
+              workflow,
+              nameMatches ? "" : query,
+            )}</td>
+          </tr>`;
+      })
+      .join("");
+    syncWorkflowExpandButton();
+  }
+
+  function syncWorkflowExpandButton() {
+    const rows = Array.from(tbody.querySelectorAll<HTMLElement>(".wf-row"));
+    const expanded = rows.filter((row) =>
+      row.classList.contains("expanded"),
+    ).length;
+    toggleButton.disabled = rows.length === 0;
+    toggleButton.textContent =
+      rows.length > 0 && expanded === rows.length ? "折叠全部" : "展开全部";
+  }
+
+  function renderTree(workflow: any, query = ""): string {
+    const tree = workflow.tree ?? [];
+    if (!tree.length) {
+      return '<div class="wf-tree muted">未识别到模型引用</div>';
+    }
+    const groups = tree
+      .map((group: any) => {
+        if (!query) return group;
+        const folderMatch = group.folder.toLowerCase().includes(query);
+        const files = group.files.filter(
+          (file: any) =>
+            folderMatch ||
+            file.name.toLowerCase().includes(query) ||
+            String(file.rel_path || "").toLowerCase().includes(query),
+        );
+        return files.length ? { ...group, files } : null;
+      })
+      .filter(Boolean);
+
+    if (!groups.length) {
+      return '<div class="wf-tree muted">没有匹配的模型</div>';
+    }
+
+    let html = '<div class="wf-tree">';
+    groups.forEach((group: any, groupIndex: number) => {
+      const lastGroup = groupIndex === groups.length - 1;
+      const unknown =
+        group.folder.includes("(未找到)") || group.folder.includes("__unknown__");
+      html += `<div class="folder">${lastGroup ? "└──" : "├──"} 📂 ${escapeHtml(
+        group.folder,
+      )}/${unknown ? ' <span class="badge unknown">类别未知</span>' : ""}</div>`;
+      group.files.forEach((file: any, fileIndex: number) => {
+        const branch = fileIndex === group.files.length - 1 ? "└──" : "├──";
+        const indent = lastGroup ? "&nbsp;&nbsp;&nbsp;&nbsp;" : "│&nbsp;&nbsp;&nbsp;";
+        const size = file.found ? file.size : file.target_size || file.size;
+        let status = "";
+        let action = "";
+        if (file.found) {
+          if (file.in_target && file.target_size === file.size) {
+            status = '<span class="badge ok">已迁移</span>';
+            action = `<button class="ghost small migrate-btn" type="button"
+              data-model-id="${file.id}" data-workflow-id="${workflow.id}"
+              data-rel-path="${escapeHtml(file.rel_path)}">重新迁移</button>`;
+          } else if (file.in_target) {
+            status = '<span class="badge fail">目标有旧版</span>';
+            action = `<button class="ghost small migrate-btn" type="button"
+              data-model-id="${file.id}" data-workflow-id="${workflow.id}"
+              data-rel-path="${escapeHtml(file.rel_path)}">覆盖迁移</button>`;
+          } else {
+            status = '<span class="badge pending">未迁移</span>';
+            action = `<button class="ghost small migrate-btn" type="button"
+              data-model-id="${file.id}" data-workflow-id="${workflow.id}"
+              data-rel-path="${escapeHtml(file.rel_path)}">迁移</button>`;
+          }
+        } else if (file.in_target) {
+          status = '<span class="badge ok">已在目标</span>';
+          action = `<button class="ghost small migrate-btn" type="button"
+            data-model-id="${file.id}" data-workflow-id="${workflow.id}"
+            data-rel-path="${escapeHtml(file.rel_path)}">迁移</button>`;
+        } else {
+          status = '<span class="badge pending">未找到</span>';
+        }
+        html += `<div class="file">${indent}${branch}
+          <span class="mono">${escapeHtml(file.name)}</span>
+          <span class="muted mono">(${fmtFileSize(size)})</span>${status}
+          ${action ? `<span style="margin-left:8px">${action}</span>` : ""}
+        </div>`;
+      });
+    });
+    return `${html}</div>`;
+  }
+
+  tbody.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement;
+    const deleteButton = target.closest<HTMLButtonElement>("button.delete-btn");
+    if (deleteButton) {
+      event.stopPropagation();
+      void onDelete(deleteButton);
+      return;
+    }
+    const openButton = target.closest<HTMLButtonElement>("button.open-btn");
+    if (openButton) {
+      event.stopPropagation();
+      void onOpen(openButton);
+      return;
+    }
+    const migrateButton = target.closest<HTMLButtonElement>("button.migrate-btn");
+    if (migrateButton) {
+      event.stopPropagation();
+      void onMigrate(migrateButton);
+      return;
+    }
+    const row = target.closest<HTMLElement>(".wf-row");
+    if (!row) return;
+    const detail = document.getElementById(row.dataset.target!);
+    if (!detail) return;
+    detail.classList.toggle("hidden");
+    row.classList.toggle("expanded");
+    syncWorkflowExpandButton();
+  });
+
+  function onDelete(button: HTMLButtonElement) {
+    const id = button.dataset.id;
+    const name = button.dataset.name || "该工作流";
+    if (!id) return;
+    const { root, close } = openOverlay(`
+      <h3>删除工作流</h3>
+      <p class="hint">确定删除「<b>${escapeHtml(name)}</b>」？</p>
+      <p class="hint">默认只删除本系统记录，不会删除磁盘上的 JSON 文件。</p>
+      <label class="cut-option">
+        <input type="checkbox" id="deleteLocalJson" />
+        <span>同时删除本地磁盘的 JSON 文件</span>
+      </label>
+      <p class="hint warn hidden" id="deleteFileWarn">
+        勾选后会永久删除该 JSON 文件，无法恢复。
+      </p>
+      <div class="actions">
+        <button class="ghost" type="button" data-action="cancel">取消</button>
+        <button class="danger" type="button" data-action="delete">删除</button>
+      </div>
+    `);
+    const deleteLocal = root.querySelector<HTMLInputElement>("#deleteLocalJson");
+    const deleteWarn = root.querySelector<HTMLElement>("#deleteFileWarn");
+    deleteLocal?.addEventListener("change", () => {
+      deleteWarn?.classList.toggle("hidden", !deleteLocal.checked);
+    });
+    root
+      .querySelector('[data-action="cancel"]')!
+      .addEventListener("click", close);
+    root
+      .querySelector('[data-action="delete"]')!
+      .addEventListener("click", async () => {
+        try {
+          const query = deleteLocal?.checked ? "?delete_file=true" : "";
+          const result = await api(`/api/workflows/${id}${query}`, {
+            method: "DELETE",
+          });
+          close();
+          toast(
+            result.file_deleted
+              ? "工作流记录与本地 JSON 文件均已删除"
+              : "工作流记录已删除",
+          );
+          document.dispatchEvent(new CustomEvent("workflows:changed"));
+        } catch (error) {
+          toast((error as Error).message, "fail");
+        }
+      });
+  }
+
+  async function onOpen(button: HTMLButtonElement) {
+    const id = button.dataset.id;
+    if (!id) return;
+    button.disabled = true;
+    try {
+      const result = await api(`/api/workflows/${id}/open`, { method: "POST" });
+      toast(`已打开目录：${result.path}`);
+    } catch (error) {
+      toast((error as Error).message, "fail");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function onMigrate(button: HTMLButtonElement) {
+    const modelId = Number(button.dataset.modelId);
+    const workflowId = Number(button.dataset.workflowId);
+    if (!modelId || !workflowId) {
+      toast("模型信息不完整，请刷新后重试", "fail");
+      return;
+    }
+    button.disabled = true;
+    try {
+      const plan = await api(
+        `/api/analyze?model_id=${modelId}&workflow_id=${workflowId}`,
+      );
+      const targetOnly = !plan.target.found && plan.target.in_target;
+      if (
+        !plan.shared_with.length &&
+        plan.candidate_models.length <= 1 &&
+        !targetOnly
+      ) {
+        await runMigration([plan.target.rel_path], false, false, "target");
+        return;
+      }
+      showConfirm(plan);
+    } catch (error) {
+      toast((error as Error).message, "fail");
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function destinationChoices(plan: any) {
+    const all = [
+      {
+        key: "target",
+        label: "迁移目标根目录",
+        path: config?.migrate_target_root || "",
+      },
+      {
+        key: "comfyui",
+        label: "ComfyUI 模型根目录",
+        path: config?.comfyui_models_root || "",
+      },
+      { key: "sd", label: "SD 模型根目录", path: config?.sd_models_root || "" },
+    ].filter((item) => item.path);
+    const targetOnly = !plan.target.found && plan.target.in_target;
+    const preferred = targetOnly
+      ? all.find((item) => item.key === "comfyui") ||
+        all.find((item) => item.key !== "target") ||
+        all[0]
+      : all.find((item) => item.key === "target") ||
+        all.find((item) => item.key === "comfyui") ||
+        all[0];
+    return { all, preferred: preferred?.key || "target" };
+  }
+
+  function showConfirm(plan: any) {
+    const shared = plan.shared_with ?? [];
+    const candidates = plan.candidate_models ?? [];
+    const { all: destinations, preferred } = destinationChoices(plan);
+    const rows = candidates
+      .map(
+        (model: any) => `
+        <label>
+          <input type="checkbox" value="${escapeHtml(model.rel_path)}"
+                 ${model.id === plan.target.id ? "checked" : ""} />
+          <span class="mono">${escapeHtml(model.rel_path)}</span>
+          ${model.id === plan.target.id ? '<span class="badge ok">当前</span>' : ""}
+          ${model.found ? "" : '<span class="badge pending">源缺失</span>'}
+          ${
+            model.in_target
+              ? '<span class="badge ok">目标已有</span>'
+              : '<span class="badge pending">目标缺失</span>'
+          }
+        </label>`,
+      )
+      .join("");
+
+    const sharedBlock = shared.length
+      ? `<div class="mono" style="margin:0 0 12px;line-height:1.9">${shared
+          .map((workflow: any) => `• ${escapeHtml(workflow.name)}`)
+          .join("<br>")}</div>`
+      : "";
+
+    const destinationBlock = destinations
+      .map(
+        (item: any) => `
+        <label class="dest-option">
+          <input type="radio" name="wfDest" value="${item.key}"
+            ${item.key === preferred ? "checked" : ""} />
+          <span class="dest-label">${escapeHtml(item.label)}</span>
+          <span class="mono muted dest-path">${escapeHtml(item.path)}</span>
+        </label>`,
+      )
+      .join("");
+
+    const modeBlock = allowDelete
+      ? `<div class="mode-row">
+           <label class="radio">
+             <input type="radio" name="wfMode" value="copy" checked />
+             复制迁移（源保留）
+           </label>
+           <label class="radio">
+             <input type="radio" name="wfMode" value="move" />
+             剪贴迁移（删除源文件）
+           </label>
+         </div>
+         <p class="hint warn hidden" id="wfModeWarn">
+           勾选剪贴后点击「确认迁移」即会删除源文件，此操作不可撤销。
+         </p>`
+      : `<p class="hint">未开启「允许删除源文件」，本次仅执行复制迁移。</p>`;
+
+    const { root, close } = openOverlay(`
+      <h3>确认迁移</h3>
+      <p class="hint">${
+        shared.length
+          ? `该模型还被 <b>${shared.length}</b> 个工作流使用：`
+          : "选择本次要迁移的模型与目标位置："
+      }</p>
+      ${sharedBlock}
+      <div class="list">${rows}</div>
+      <p class="hint">选择迁移到哪个位置：</p>
+      <div class="dest-list">${destinationBlock}</div>
+      ${modeBlock}
+      <label class="cut-option hidden" id="wfOverwriteOption">
+        <input type="checkbox" id="wfOverwrite" />
+        <span>覆盖目标端同名文件（内容不同时风险操作）</span>
+      </label>
+      <p class="hint hidden" id="wfOverwriteWarn"></p>
+      <div class="space-info" id="wfSpaceInfo">空间检查中…</div>
+      <div class="actions">
+        <button class="ghost" type="button" data-action="cancel">取消</button>
+        <button type="button" data-action="confirm">确认迁移</button>
+      </div>
+    `);
+
+    const wfSpaceInfo = root.querySelector<HTMLElement>("#wfSpaceInfo")!;
+    const wfOverwriteOption = root.querySelector<HTMLElement>("#wfOverwriteOption")!;
+    const wfOverwrite = root.querySelector<HTMLInputElement>("#wfOverwrite");
+    const wfOverwriteWarn = root.querySelector<HTMLElement>("#wfOverwriteWarn")!;
+    const confirmButton = root.querySelector<HTMLButtonElement>(
+      '[data-action="confirm"]',
+    )!;
+    const selectedPaths = () =>
+      Array.from(
+        root.querySelectorAll<HTMLInputElement>(
+          '.list input[type="checkbox"]:checked',
+        ),
+      ).map((input) => input.value);
+
+    async function updateSpace() {
+      const paths = selectedPaths();
+      if (!paths.length) {
+        wfSpaceInfo.className = "space-info";
+        wfSpaceInfo.textContent = "请勾选要迁移的模型";
+        confirmButton.disabled = true;
+        return;
+      }
+      const destination =
+        root.querySelector<HTMLInputElement>('input[name="wfDest"]:checked')
+          ?.value || "target";
+      wfSpaceInfo.className = "space-info";
+      wfSpaceInfo.textContent = "空间检查中…";
+      confirmButton.disabled = true;
+      const overwrite = Boolean(wfOverwrite?.checked);
+      try {
+        const plan = await api("/api/migrate/preflight", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rel_paths: paths, destination, overwrite }),
+        });
+
+        const targetFiles = (plan.files || []).filter(
+          (file: any) => file.target_exists,
+        );
+        const risks: string[] = plan.risk_messages || [];
+        if (targetFiles.length) {
+          wfOverwriteOption.classList.remove("hidden");
+          wfOverwriteWarn.classList.remove("hidden");
+          wfOverwriteWarn.classList.toggle("warn", Boolean(plan.requires_overwrite));
+          wfOverwriteWarn.textContent = risks.length
+            ? risks.join("；")
+            : "目标已有相同文件；勾选覆盖可强制重写。";
+        } else {
+          wfOverwriteOption.classList.add("hidden");
+          wfOverwriteWarn.classList.add("hidden");
+          if (wfOverwrite) wfOverwrite.checked = false;
+        }
+
+        if (plan.requires_overwrite && !overwrite) {
+          wfSpaceInfo.classList.add("fail");
+          wfSpaceInfo.textContent =
+            "目标端存在同名但内容不同的文件；勾选「覆盖」后才能继续。";
+          confirmButton.disabled = true;
+          return;
+        }
+
+        if (plan.ok) {
+          const move =
+            allowDelete &&
+            root.querySelector<HTMLInputElement>('input[name="wfMode"]:checked')
+              ?.value === "move";
+          if (move && (plan.files || []).some((file: any) => file.same_location)) {
+            wfSpaceInfo.classList.add("fail");
+            wfSpaceInfo.textContent =
+              "目标位置与源位置相同，剪贴不会删除源文件；请取消勾选这些文件或改用复制。";
+            confirmButton.disabled = true;
+            return;
+          }
+          wfSpaceInfo.classList.add("ok");
+          wfSpaceInfo.textContent = `需要 ${fmtBytes(plan.need_bytes)} · 目标可用 ${fmtBytes(plan.free_bytes)}${
+            plan.need_bytes === 0 ? " · 目标已有相同文件，无需复制" : ""
+          }`;
+          confirmButton.disabled = false;
+        } else {
+          wfSpaceInfo.classList.add("fail");
+          wfSpaceInfo.textContent = `${plan.reason}（需要 ${fmtBytes(
+            plan.need_bytes,
+          )}，可用 ${fmtBytes(plan.free_bytes)}）`;
+        }
+      } catch (error) {
+        wfSpaceInfo.classList.add("fail");
+        wfSpaceInfo.textContent = `空间检查失败：${(error as Error).message}`;
+      }
+    }
+
+    root
+      .querySelectorAll<HTMLInputElement>('.list input[type="checkbox"]')
+      .forEach((input) => input.addEventListener("change", () => void updateSpace()));
+    root
+      .querySelectorAll<HTMLInputElement>('input[name="wfDest"]')
+      .forEach((input) => input.addEventListener("change", () => void updateSpace()));
+    wfOverwrite?.addEventListener("change", () => void updateSpace());
+    const modeWarn = root.querySelector<HTMLElement>("#wfModeWarn");
+    root.querySelectorAll<HTMLInputElement>('input[name="wfMode"]').forEach((input) => {
+      input.addEventListener("change", () => {
+        modeWarn?.classList.toggle("hidden", input.value !== "move" || !input.checked);
+        void updateSpace();
+      });
+    });
+    void updateSpace();
+
+    root
+      .querySelector('[data-action="cancel"]')!
+      .addEventListener("click", close);
+    confirmButton.addEventListener("click", () => {
+      const paths = selectedPaths();
+      const destination =
+        root.querySelector<HTMLInputElement>('input[name="wfDest"]:checked')
+          ?.value || "target";
+      const move =
+        allowDelete &&
+        root.querySelector<HTMLInputElement>('input[name="wfMode"]:checked')
+          ?.value === "move";
+      const overwrite = Boolean(wfOverwrite?.checked);
+      close();
+      if (!paths.length) {
+        toast("没有选择任何模型", "fail");
+        return;
+      }
+      void runMigration(paths, move, overwrite, destination);
+    });
+  }
+
+  async function runMigration(
+    relPaths: string[],
+    move = false,
+    overwrite = false,
+    destination = "target",
+  ) {
+    try {
+      const outcome = await runMigrationTask({
+        rel_paths: relPaths,
+        destination,
+        move,
+        overwrite,
+      });
+      if (outcome.status === "cancelled") {
+        toast("任务已取消，未完成的临时文件已清理", "fail");
+      } else if (outcome.status === "failed") {
+        toast(outcome.task.message || "迁移任务失败", "fail");
+      } else if (outcome.results.length) {
+        showResults(outcome.results, move);
+      }
+      document.dispatchEvent(new CustomEvent("migrations:changed"));
+      document.dispatchEvent(new CustomEvent("workflows:changed"));
+    } catch (error) {
+      toast((error as Error).message, "fail");
+    }
+  }
+
+  function showResults(results: any[], move = false) {
+    const success = results.filter((item) => item.status === "success").length;
+    const rows = results
+      .map(
+        (item) => `
+        <label>
+          ${statusBadge(item.status)}
+          <span class="mono">${escapeHtml(item.rel_path)}</span>
+          <span class="muted" style="font-size:12px">${escapeHtml(item.message)}</span>
+        </label>`,
+      )
+      .join("");
+
+    const { root, close } = openOverlay(`
+      <h3>迁移结果</h3>
+      <p class="hint">成功 ${success} 个，失败 ${results.length - success} 个。${
+        move ? "已按剪贴模式删除成功项源文件。" : "源文件保持不变。"
+      }</p>
+      <div class="list">${rows}</div>
+      <div class="actions">
+        <button type="button" data-action="close">关闭并查看日志</button>
+      </div>
+    `);
+
+    root.querySelector('[data-action="close"]')!.addEventListener("click", () => {
+      close();
+      showTab("logs");
+    });
+  }
+
+  search.addEventListener("input", () => {
+    renderList();
+    syncClearButton();
+  });
+  clearSearch.addEventListener("click", () => {
+    search.value = "";
+    renderList();
+    syncClearButton();
+    search.focus();
+  });
+
+  byId("refreshWf").addEventListener("click", () => {
+    void load();
+  });
+  toggleButton.addEventListener("click", () => {
+    const rows = Array.from(tbody.querySelectorAll<HTMLElement>(".wf-row"));
+    if (!rows.length) return;
+    const allOpen = rows.every((row) => row.classList.contains("expanded"));
+    rows.forEach((row) => {
+      row.classList.toggle("expanded", !allOpen);
+      const detail = document.getElementById(row.dataset.target!);
+      detail?.classList.toggle("hidden", allOpen);
+    });
+    syncWorkflowExpandButton();
+  });
+  document.addEventListener("workflows:changed", () => {
+    void load();
+  });
+  document.addEventListener("config:changed", () => {
+    void loadConfig();
+  });
+  document.addEventListener("tab:activated", (event) => {
+    if ((event as CustomEvent<{ id: string }>).detail.id === "workflows") {
+      void load();
+    }
+  });
+
+  void load();
+  syncClearButton();
+</script>

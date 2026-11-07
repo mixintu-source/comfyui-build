@@ -1,0 +1,26 @@
+---
+import Layout from "../layouts/Layout.astro";
+import Tabs from "../components/Tabs.astro";
+import Dashboard from "../components/tab/Dashboard.astro";
+import Paths from "../components/tab/Paths.astro";
+import Models from "../components/tab/Models.astro";
+import Workflows from "../components/tab/Workflows.astro";
+import Logs from "../components/tab/Logs.astro";
+---
+
+<Layout title="ComfyUI 模型迁移管理">
+  <header class="page-head">
+    <div>
+      <h1>ComfyUI 模型迁移管理</h1>
+      <p class="muted">工作流解析 · 引用分析 · 一键安全迁移</p>
+    </div>
+    <span class="muted mono">本地运行 · 数据不外发</span>
+  </header>
+
+  <Tabs />
+  <Dashboard />
+  <Paths />
+  <Models />
+  <Workflows />
+  <Logs />
+</Layout>

@@ -1,0 +1,65 @@
+---
+const tabs = [
+  { id: "dashboard", label: "📊 主页面" },
+  { id: "paths", label: "⚙️ 路径配置" },
+  { id: "models", label: "🧩 模型文件" },
+  { id: "workflows", label: "🗂️ 工作流" },
+  { id: "logs", label: "📝 日志记录" },
+];
+---
+
+<nav class="tabs" id="tabNav" role="tablist" aria-label="主导航">
+  {
+    tabs.map((tab, index) => (
+      <button
+        type="button"
+        role="tab"
+        class:list={["tab", { active: index === 0 }]}
+        data-tab={tab.id}
+        aria-selected={index === 0 ? "true" : "false"}
+      >
+        {tab.label}
+      </button>
+    ))
+  }
+</nav>
+
+<script>
+  const nav = document.getElementById("tabNav")!;
+  const known = new Set(
+    Array.from(nav.querySelectorAll<HTMLElement>(".tab")).map(
+      (tab) => tab.dataset.tab!,
+    ),
+  );
+
+  function activate(id: string) {
+    if (!known.has(id)) id = "dashboard";
+    nav.querySelectorAll<HTMLElement>(".tab").forEach((tab) => {
+      const active = tab.dataset.tab === id;
+      tab.classList.toggle("active", active);
+      tab.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    document.querySelectorAll<HTMLElement>(".tab-panel").forEach((panel) => {
+      panel.classList.toggle("hidden", panel.dataset.panel !== id);
+    });
+    if (window.location.hash.slice(1) !== id) {
+      history.replaceState(null, "", `#${id}`);
+    }
+    document.dispatchEvent(new CustomEvent("tab:activated", { detail: { id } }));
+  }
+
+  nav.querySelectorAll<HTMLElement>(".tab").forEach((tab) => {
+    tab.addEventListener("click", () => activate(tab.dataset.tab!));
+  });
+
+  document.addEventListener("tab:show", (event) => {
+    activate((event as CustomEvent<{ id: string }>).detail.id);
+  });
+
+  window.addEventListener("hashchange", () => {
+    const id = window.location.hash.slice(1);
+    if (id) activate(id);
+  });
+
+  activate(window.location.hash.slice(1) || "dashboard");
+</script>

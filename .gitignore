@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+data/
+demo/
+.tmp/
+
+web/node_modules/
+web/dist/
+web/.astro/
+
+ui-*.png

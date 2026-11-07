@@ -1,0 +1,173 @@
+---
+---
+
+<section class="tab-panel" data-panel="dashboard">
+  <div class="grid cols-4">
+    <div class="card">
+      <div class="muted">模型文件（ComfyUI + SD）</div>
+      <div class="stat" id="stModels">–</div>
+      <div class="muted mono" id="stBytes">扫描中…</div>
+    </div>
+    <div class="card">
+      <div class="muted">工作流 JSON</div>
+      <div class="stat" id="stWorkflows">–</div>
+      <div class="muted mono">已导入本系统</div>
+    </div>
+    <div class="card">
+      <div class="muted">成功迁移</div>
+      <div class="stat ok" id="stMigrated">–</div>
+      <div class="muted mono">按文件计数</div>
+    </div>
+    <div class="card">
+      <div class="muted">迁移失败</div>
+      <div class="stat fail" id="stFailed">–</div>
+      <div class="muted mono">可在日志中查看原因</div>
+    </div>
+  </div>
+
+  <div class="grid cols-2">
+    <div class="card">
+      <h2>最近迁移</h2>
+      <table class="recent-table">
+        <colgroup>
+          <col style="width: 50%" />
+          <col style="width: 20%" />
+          <col style="width: 30%" />
+        </colgroup>
+        <thead>
+          <tr><th>文件</th><th>状态</th><th>时间</th></tr>
+        </thead>
+        <tbody id="recentMig">
+          <tr><td colspan="3" class="empty">加载中…</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2>最近工作流</h2>
+      <table class="recent-table">
+        <colgroup>
+          <col style="width: 54%" />
+          <col style="width: 16%" />
+          <col style="width: 30%" />
+        </colgroup>
+        <thead>
+          <tr><th>名称</th><th>模型数</th><th>修改时间</th></tr>
+        </thead>
+        <tbody id="recentWf">
+          <tr><td colspan="3" class="empty">加载中…</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<script>
+  import {
+    api,
+    basename,
+    byId,
+    copyText,
+    escapeHtml,
+    fmtBytes,
+    openOverlay,
+    statusBadge,
+    toast,
+  } from "../../lib/ui";
+
+  const modelsEl = byId("stModels");
+  const bytesEl = byId("stBytes");
+  const workflowsEl = byId("stWorkflows");
+  const migratedEl = byId("stMigrated");
+  const failedEl = byId("stFailed");
+  const recentMig = byId("recentMig");
+  const recentWf = byId("recentWf");
+
+  async function load() {
+    try {
+      const data = await api("/api/stats");
+      modelsEl.textContent = `${data.total_models} 个`;
+      bytesEl.textContent = `源 ${fmtBytes(data.model_bytes)} · 目标已有 ${data.target_models ?? 0} 个`;
+      workflowsEl.textContent = `${data.total_workflows} 个`;
+      migratedEl.textContent = `${data.migrated_count} 次`;
+      failedEl.textContent = `${data.failed_count} 次`;
+
+      recentMig.innerHTML = data.recent_migrations.length
+        ? data.recent_migrations
+            .map(
+              (item: any) => `<tr>
+                <td class="mono" title="点击复制：${escapeHtml(
+                  basename(item.rel_path),
+                )}" data-copy="${escapeHtml(basename(item.rel_path))}">
+                  <span class="copy-name">${escapeHtml(
+                    basename(item.rel_path),
+                  )}</span>
+                </td>
+                <td>${statusBadge(item.status)}</td>
+                <td class="muted mono nowrap">${escapeHtml(item.ts)}</td>
+              </tr>`,
+            )
+            .join("")
+        : '<tr><td colspan="3" class="empty">暂无记录</td></tr>';
+
+      recentWf.innerHTML = data.recent_workflows.length
+        ? data.recent_workflows
+            .map(
+              (item: any) => `<tr>
+                <td title="点击复制：${escapeHtml(item.name)}" data-copy="${escapeHtml(
+                  item.name,
+                )}">
+                  <span class="copy-name">${escapeHtml(item.name)}</span>
+                </td>
+                <td class="mono">${item.model_count}</td>
+                <td class="muted mono nowrap">${escapeHtml(
+                  item.modified_at || "文件缺失",
+                )}</td>
+              </tr>`,
+            )
+            .join("")
+        : '<tr><td colspan="3" class="empty">暂无记录</td></tr>';
+    } catch (error) {
+      bytesEl.textContent = "无法读取统计";
+      recentMig.innerHTML = `<tr><td colspan="3" class="empty">${escapeHtml(
+        (error as Error).message,
+      )}</td></tr>`;
+      recentWf.innerHTML = '<tr><td colspan="3" class="empty">—</td></tr>';
+    }
+  }
+
+  function onCopyClick(event: Event) {
+    const target = event.target as HTMLElement;
+    const cell = target.closest<HTMLElement>("[data-copy]");
+    if (!cell) return;
+    const value = cell.dataset.copy || "";
+    void copyText(value).then((ok) => {
+      if (ok) {
+        toast(`已复制：${value}`);
+        return;
+      }
+      const { root } = openOverlay(`
+        <h3>复制失败</h3>
+        <p class="hint">浏览器未授予剪贴板权限，请手动复制：</p>
+        <input class="mono" readonly value="${escapeHtml(value)}" style="width:100%" />
+      `);
+      root.querySelector<HTMLInputElement>("input")?.select();
+    });
+  }
+
+  recentMig.addEventListener("click", onCopyClick);
+  recentWf.addEventListener("click", onCopyClick);
+
+  document.addEventListener("tab:activated", (event) => {
+    if ((event as CustomEvent<{ id: string }>).detail.id === "dashboard") {
+      void load();
+    }
+  });
+
+  document.addEventListener("migrations:changed", () => {
+    if (!byId("stModels").closest(".tab-panel")!.classList.contains("hidden")) {
+      void load();
+    }
+  });
+
+  void load();
+</script>

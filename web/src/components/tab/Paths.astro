@@ -1,0 +1,367 @@
+---
+---
+
+<section class="tab-panel hidden" data-panel="paths">
+  <div class="card">
+    <h2>路径配置</h2>
+    <div class="grid cols-2">
+      <div>
+        <label for="pComfy">ComfyUI 模型根目录</label>
+        <input id="pComfy" type="text" placeholder="D:/working/ComfyUI" spellcheck="false" />
+      </div>
+      <div>
+        <label for="pSd">SD 模型根目录（可选）</label>
+        <input id="pSd" type="text" placeholder="D:/working/SD" spellcheck="false" />
+      </div>
+      <div>
+        <label for="pTarget">迁移模型存储目标根目录（ComfyUI 根或 models/）</label>
+        <input id="pTarget" type="text" placeholder="E:/working/ComfyUI" spellcheck="false" />
+      </div>
+      <div>
+        <label for="pWfJson">工作流 JSON 目录</label>
+        <input id="pWfJson" type="text" placeholder="D:/working/ComfyUI/user/default/workflows" spellcheck="false" />
+      </div>
+      <div>
+        <label for="pSdWf">SD 工作流目录（可选）</label>
+        <input id="pSdWf" type="text" placeholder="D:/working/SD/workflows" spellcheck="false" />
+      </div>
+      <div>
+        <label>安全选项</label>
+        <label class="checkbox-line">
+          <input id="pAllowDelete" type="checkbox" />
+          <span>允许删除源文件（开启后才显示剪贴入口）</span>
+        </label>
+      </div>
+    </div>
+    <div style="margin-top:14px;display:flex;gap:10px;flex-wrap:wrap">
+      <button id="saveCfg" type="button">保存路径</button>
+      <button id="scanWf" class="ghost" type="button">扫描工作流目录…</button>
+    </div>
+    <div id="cfgErrors" class="errors hidden"></div>
+    <div id="cfgWarnings" class="warnings hidden"></div>
+    <p id="cfgHint" class="muted mono" style="margin:10px 0 0"></p>
+  </div>
+
+  <div class="card">
+    <h2>拖拽上传工作流 JSON（自动解析模型）</h2>
+    <div class="dropzone" id="dz">
+      <div class="drop-icon">📥</div>
+      <div>将 .json 文件拖到此处，或 <u>点击选择</u></div>
+      <div class="muted mono" style="margin-top:6px">上传后按工作流目录或 data/uploads 保存</div>
+    </div>
+    <input id="fileInput" type="file" accept=".json,application/json" multiple class="hidden" />
+    <div id="uploadResults"></div>
+  </div>
+</section>
+
+<script>
+  import {
+    api,
+    byId,
+    escapeHtml,
+    fmtFileSize,
+    openOverlay,
+    toast,
+  } from "../../lib/ui";
+
+  const FIELDS = [
+    ["comfyui_models_root", "pComfy"],
+    ["sd_models_root", "pSd"],
+    ["migrate_target_root", "pTarget"],
+    ["workflow_json_dir", "pWfJson"],
+    ["sd_workflow_dir", "pSdWf"],
+  ] as const;
+
+  const hint = byId("cfgHint");
+  const results = byId("uploadResults");
+  const errorsBox = byId("cfgErrors");
+  const warningsBox = byId("cfgWarnings");
+  const allowDelete = byId<HTMLInputElement>("pAllowDelete");
+
+  function setHint(message: string) {
+    hint.textContent = message;
+  }
+
+  function renderValidation(result: any) {
+    const errors = result.errors ?? [];
+    const warnings = result.warnings ?? [];
+    errorsBox.classList.toggle("hidden", errors.length === 0);
+    warningsBox.classList.toggle("hidden", warnings.length === 0);
+    errorsBox.innerHTML = errors.length
+      ? `<b>配置错误：</b><ul>${errors
+          .map(
+            (item: any) =>
+              `<li>${escapeHtml(item.label)}：${escapeHtml(item.message)}</li>`,
+          )
+          .join("")}</ul>`
+      : "";
+    warningsBox.innerHTML = warnings.length
+      ? `<b>提示：</b><ul>${warnings
+          .map(
+            (item: any) =>
+              `<li>${escapeHtml(item.label)}：${escapeHtml(item.message)}</li>`,
+          )
+          .join("")}</ul>`
+      : "";
+  }
+
+  async function loadConfig() {
+    try {
+      const config = await api("/api/config");
+      for (const [key, id] of FIELDS) {
+        byId<HTMLInputElement>(id).value = config[key] || "";
+      }
+      allowDelete.checked = Boolean(config.allow_delete_source);
+    } catch (error) {
+      setHint(`读取配置失败：${(error as Error).message}`);
+    }
+  }
+
+  function collectConfig(): Record<string, string | boolean> {
+    const body: Record<string, string | boolean> = {
+      allow_delete_source: allowDelete.checked,
+    };
+    for (const [key, id] of FIELDS) {
+      body[key] = byId<HTMLInputElement>(id).value.trim();
+    }
+    return body;
+  }
+
+  async function saveConfig(): Promise<boolean> {
+    const body = collectConfig();
+    try {
+      const validation = await api("/api/config/validate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      renderValidation(validation);
+      if (!validation.ok) {
+        setHint("✘ 配置有误，未保存");
+        return false;
+      }
+      const saved = await api("/api/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      for (const [key, id] of FIELDS) {
+        byId<HTMLInputElement>(id).value = saved[key] || "";
+      }
+      allowDelete.checked = Boolean(saved.allow_delete_source);
+      setHint("✔ 已保存");
+      document.dispatchEvent(new CustomEvent("config:changed"));
+      return true;
+    } catch (error) {
+      const detail = (error as any).detail;
+      if (detail?.errors) renderValidation(detail);
+      setHint(`✘ 保存失败：${(error as Error).message}`);
+      return false;
+    }
+  }
+
+  byId("saveCfg").addEventListener("click", () => {
+    void saveConfig();
+  });
+
+  byId("scanWf").addEventListener("click", () => {
+    void openScanPreview();
+  });
+
+  async function openScanPreview() {
+    if (!(await saveConfig())) return;
+    setHint("扫描中…");
+    try {
+      const data = await api("/api/workflows/scan/preview");
+      const files = data.files ?? [];
+      if (!files.length) {
+        setHint("扫描完成：目录下没有 .json 文件");
+        return;
+      }
+      const rows = files
+        .map(
+          (file: any) => `
+          <label>
+            <input type="checkbox" data-path="${escapeHtml(file.path)}"
+              ${file.imported ? "disabled" : "checked"} />
+            <span class="mono">${escapeHtml(file.name)}</span>
+            ${file.imported ? '<span class="badge pending">已导入</span>' : ""}
+          </label>`,
+        )
+        .join("");
+      const { root, close } = openOverlay(`
+        <h3>扫描到的工作流</h3>
+        <div class="scan-head">
+          <p class="hint">共 ${files.length} 个 JSON；已导入的不可重复勾选。</p>
+          <div class="scan-actions">
+            <span class="muted mono" id="scanSelected"></span>
+            <button class="ghost small" type="button" data-action="select-all">全选</button>
+            <button class="ghost small" type="button" data-action="invert">反选</button>
+          </div>
+        </div>
+        <div class="list scan-list">${rows}</div>
+        <div class="actions">
+          <button class="ghost" type="button" data-action="cancel">取消</button>
+          <button type="button" data-action="import">导入所选</button>
+        </div>
+      `);
+      root.querySelector<HTMLElement>(".modal")?.classList.add("scan-modal");
+      const boxes = () =>
+        Array.from(
+          root.querySelectorAll<HTMLInputElement>(
+            '.list input[type="checkbox"]:not(:disabled)',
+          ),
+        );
+      const selected = root.querySelector<HTMLElement>("#scanSelected")!;
+      const selectAllButton = root.querySelector<HTMLButtonElement>(
+        '[data-action="select-all"]',
+      )!;
+      const invertButton = root.querySelector<HTMLButtonElement>(
+        '[data-action="invert"]',
+      )!;
+      const importButton = root.querySelector<HTMLButtonElement>(
+        '[data-action="import"]',
+      )!;
+      function syncSelected() {
+        const items = boxes();
+        const checked = items.filter((box) => box.checked).length;
+        selected.textContent = items.length
+          ? `已选 ${checked} 个`
+          : "全部已导入";
+        selectAllButton.disabled = items.length === 0;
+        invertButton.disabled = items.length === 0;
+        importButton.disabled = checked === 0;
+      }
+      boxes().forEach((box) => box.addEventListener("change", syncSelected));
+      selectAllButton.addEventListener("click", () => {
+        boxes().forEach((box) => (box.checked = true));
+        syncSelected();
+      });
+      invertButton.addEventListener("click", () => {
+        boxes().forEach((box) => (box.checked = !box.checked));
+        syncSelected();
+      });
+      syncSelected();
+      root
+        .querySelector('[data-action="cancel"]')!
+        .addEventListener("click", close);
+      root
+        .querySelector('[data-action="import"]')!
+        .addEventListener("click", async () => {          const paths = Array.from(
+            root.querySelectorAll<HTMLInputElement>(
+              '.list input[type="checkbox"]:checked',
+            ),
+          ).map((input) => input.dataset.path!);
+          if (!paths.length) {
+            toast("没有选择任何工作流", "fail");
+            return;
+          }
+          try {
+            const imported = await api("/api/workflows/scan/import", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ paths }),
+            });
+            close();
+            setHint(`✔ 已导入 ${imported.imported_count} 个工作流`);
+            document.dispatchEvent(new CustomEvent("workflows:changed"));
+            toast(`导入完成：${imported.imported_count} 个工作流`);
+          } catch (error) {
+            toast((error as Error).message, "fail");
+          }
+        });
+      setHint("");
+    } catch (error) {
+      setHint(`✘ ${(error as Error).message}`);
+      toast((error as Error).message, "fail");
+    }
+  }
+
+  // ---- upload ----
+  const dropzone = byId("dz");
+  const fileInput = byId<HTMLInputElement>("fileInput");
+
+  dropzone.addEventListener("click", () => fileInput.click());
+  dropzone.addEventListener("dragover", (event) => {
+    event.preventDefault();
+    dropzone.classList.add("over");
+  });
+  dropzone.addEventListener("dragleave", () => dropzone.classList.remove("over"));
+  dropzone.addEventListener("drop", (event) => {
+    event.preventDefault();
+    dropzone.classList.remove("over");
+    void uploadFiles(Array.from(event.dataTransfer?.files ?? []));
+  });
+  fileInput.addEventListener("change", () => {
+    void uploadFiles(Array.from(fileInput.files ?? []));
+    fileInput.value = "";
+  });
+
+  async function uploadFiles(files: File[]) {
+    const selected = files.filter((file) => file.name.toLowerCase().endsWith(".json"));
+    if (!selected.length) {
+      toast("只接受 .json 工作流文件", "fail");
+      return;
+    }
+    for (const file of selected) {
+      const card = document.createElement("div");
+      card.className = "upload-result";
+      card.innerHTML = `<b>${escapeHtml(file.name)}</b> <span class="muted mono">上传中…</span>`;
+      results.prepend(card);
+      const form = new FormData();
+      form.append("file", file);
+      try {
+        const data = await api("/api/upload", { method: "POST", body: form });
+        card.innerHTML = `
+          <b>${escapeHtml(file.name)}</b>
+          <span class="badge ok">解析成功</span>
+          <span class="muted mono">（${data.model_count} 个模型）</span>
+          ${renderPreviewTree(data.workflow.tree)}`;
+        toast(`${file.name} 已导入`);
+      } catch (error) {
+        card.innerHTML = `
+          <b>${escapeHtml(file.name)}</b>
+          <span class="badge fail">失败</span>
+          <div class="muted mono" style="margin-top:8px">${escapeHtml(
+            (error as Error).message,
+          )}</div>`;
+      }
+    }
+    document.dispatchEvent(new CustomEvent("workflows:changed"));
+  }
+
+  function renderPreviewTree(tree: any[]): string {
+    if (!tree?.length) {
+      return '<div class="muted" style="margin-top:10px">未识别到模型引用</div>';
+    }
+    let html = '<div class="tree" style="margin-top:10px">';
+    tree.forEach((group, groupIndex) => {
+      const lastGroup = groupIndex === tree.length - 1;
+      html += `<div class="folder">${lastGroup ? "└──" : "├──"} 📂 ${escapeHtml(
+        group.folder,
+      )}/</div>`;
+      group.files.forEach((file: any, fileIndex: number) => {
+        const branch = fileIndex === group.files.length - 1 ? "└──" : "├──";
+        const indent = lastGroup ? "&nbsp;&nbsp;&nbsp;&nbsp;" : "│&nbsp;&nbsp;&nbsp;";
+        const missing = file.found
+          ? ""
+          : ' <span class="badge pending">未找到</span>';
+        html += `<div class="file">${indent}${branch} ${escapeHtml(
+          file.name,
+        )} <span class="muted">(${fmtFileSize(file.size)})</span>${missing}</div>`;
+      });
+    });
+    return `${html}</div>`;
+  }
+
+  document.addEventListener("tab:activated", (event) => {
+    if ((event as CustomEvent<{ id: string }>).detail.id === "paths") {
+      void loadConfig();
+    }
+  });
+  document.addEventListener("config:changed", () => {
+    void loadConfig();
+  });
+
+  void loadConfig();
+</script>

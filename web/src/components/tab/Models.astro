@@ -1,0 +1,781 @@
+---
+---
+
+<section class="tab-panel hidden" data-panel="models">
+  <div class="card">
+    <div class="section-head">
+      <h2>模型文件（*.safetensors / *.gguf 等）</h2>
+      <span class="muted mono">与「路径配置」共用同一份设置</span>
+    </div>
+    <div class="grid cols-3">
+      <div>
+        <label for="mComfy">ComfyUI 模型根目录</label>
+        <input id="mComfy" type="text" placeholder="G:/ComfyUI-Shared/models" spellcheck="false" />
+      </div>
+      <div>
+        <label for="mSd">SD 模型根目录（可选）</label>
+        <input id="mSd" type="text" placeholder="D:/working/SD/models" spellcheck="false" />
+      </div>
+      <div>
+        <label for="mTarget">迁移目标根目录（ComfyUI 根或 models/）</label>
+        <input id="mTarget" type="text" placeholder="I:/models" spellcheck="false" />
+      </div>
+    </div>
+    <div class="toolbar" style="margin-top:14px">
+      <button id="saveModelCfg" type="button">保存模型路径</button>
+      <span id="modelCfgHint" class="muted mono"></span>
+      <span id="rootWarn" class="warn"></span>
+    </div>
+  </div>
+
+  <div class="summary-grid" id="modelSummary">
+    <div class="summary-card">
+      <div class="muted">源模型</div>
+      <div class="summary-value" id="sumSource">–</div>
+      <div class="muted mono" id="sumSourceBytes"></div>
+    </div>
+    <div class="summary-card">
+      <div class="muted">目标已有</div>
+      <div class="summary-value ok" id="sumTarget">–</div>
+      <div class="muted mono" id="sumTargetBytes"></div>
+    </div>
+    <div class="summary-card">
+      <div class="muted">两边都有</div>
+      <div class="summary-value" id="sumBoth">–</div>
+      <div class="muted mono">已迁移 / 可重新迁移</div>
+    </div>
+    <div class="summary-card">
+      <div class="muted">待迁移</div>
+      <div class="summary-value warn-text" id="sumPending">–</div>
+      <div class="muted mono">仅存在于源目录</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="section-head" style="margin-bottom:12px">
+      <h2 style="margin:0">模型文件列表（点击行展开模型文件树）</h2>
+      <button id="toggleModelGroups" class="ghost small" type="button">展开全部</button>
+    </div>
+    <div class="toolbar" style="margin-bottom:12px">
+      <div class="search-box">
+        <input id="modelSearch" type="text" placeholder="搜索文件名 / 目录" />
+        <button id="clearModelSearch" class="search-clear hidden" type="button" title="清空搜索" aria-label="清空搜索">×</button>
+      </div>
+      <select id="modelFilter" style="width:auto;min-width:130px">
+        <option value="">全部状态</option>
+        <option value="pending">待迁移</option>
+        <option value="migrated">已迁移</option>
+        <option value="target_only">仅目标</option>
+      </select>
+      <select id="modelSort" style="width:auto;min-width:130px">
+        <option value="name">按名称</option>
+        <option value="size_desc">大小从大到小</option>
+        <option value="size_asc">大小从小到大</option>
+      </select>
+      <button id="refreshModels" class="ghost small" type="button">刷新</button>
+      <button id="batchMigrate" type="button" disabled>批量迁移（0）</button>
+      <span class="muted mono" id="modelCount" style="margin-left:auto"></span>
+    </div>
+    <table class="models-table">
+      <colgroup>
+        <col style="width: 46%" />
+        <col style="width: 96px" />
+        <col style="width: 140px" />
+        <col style="width: 72px" />
+        <col style="width: 84px" />
+      </colgroup>
+      <thead>
+        <tr>
+          <th>
+            <label class="select-all">
+              <input id="selectAll" type="checkbox" />
+              <span>目录 / 文件</span>
+            </label>
+          </th>
+          <th>大小</th>
+          <th>位置</th>
+          <th>引用数</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="modelBody">
+        <tr><td colspan="5" class="empty">加载中…</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<script>
+  import {
+    api,
+    byId,
+    escapeHtml,
+    fmtBytes,
+    openOverlay,
+    runMigrationTask,
+    statusBadge,
+    toast,
+  } from "../../lib/ui";
+
+  type RootKey = "comfyui" | "sd" | "target";
+
+  type ModelRow = {
+    rel_path: string;
+    name: string;
+    folder: string;
+    size: number;
+    sources: string[];
+    present_in: RootKey[];
+    in_target: boolean;
+    target_size: number;
+    workflow_count: number;
+    status: "migrated" | "pending" | "target_only";
+  };
+
+  type RootInfo = { path: string; exists: boolean };
+
+  type Inventory = {
+    summary: {
+      source_count: number;
+      target_count: number;
+      both_count: number;
+      pending_count: number;
+      total_count: number;
+      source_bytes: number;
+      target_bytes: number;
+      roots: Record<RootKey, RootInfo>;
+    };
+    models: ModelRow[];
+  };
+
+  const ROOT_META: Record<RootKey, { label: string; short: string; order: number }> = {
+    target: { label: "迁移目标根目录", short: "目标", order: 0 },
+    comfyui: { label: "ComfyUI 模型根目录", short: "ComfyUI", order: 1 },
+    sd: { label: "SD 模型根目录", short: "SD", order: 2 },
+  };
+
+  const FIELDS = [
+    ["comfyui_models_root", "mComfy"],
+    ["sd_models_root", "mSd"],
+    ["migrate_target_root", "mTarget"],
+  ] as const;
+
+  const hint = byId("modelCfgHint");
+  const rootWarn = byId("rootWarn");
+  const search = byId<HTMLInputElement>("modelSearch");
+  const clearSearch = byId<HTMLButtonElement>("clearModelSearch");
+  const filter = byId<HTMLSelectElement>("modelFilter");
+  const sortSelect = byId<HTMLSelectElement>("modelSort");
+  const tbody = byId("modelBody");
+  const count = byId("modelCount");
+  const selectAll = byId<HTMLInputElement>("selectAll");
+  const batchButton = byId<HTMLButtonElement>("batchMigrate");
+  const expandButton = byId<HTMLButtonElement>("toggleModelGroups");
+
+  let rows: ModelRow[] = [];
+  let currentVisible: ModelRow[] = [];
+  let allowDelete = false;
+  let groupsExpanded = false;
+  const selected = new Set<string>();
+  let roots: Record<RootKey, RootInfo> = {
+    comfyui: { path: "", exists: false },
+    sd: { path: "", exists: false },
+    target: { path: "", exists: false },
+  };
+
+  async function loadConfig() {
+    const config = await api("/api/config");
+    for (const [key, id] of FIELDS) {
+      byId<HTMLInputElement>(id).value = config[key] || "";
+    }
+    allowDelete = Boolean(config.allow_delete_source);
+  }
+
+  async function saveConfig() {
+    try {
+      const current = await api("/api/config");
+      const body = {
+        ...current,
+        comfyui_models_root: byId<HTMLInputElement>("mComfy").value.trim(),
+        sd_models_root: byId<HTMLInputElement>("mSd").value.trim(),
+        migrate_target_root: byId<HTMLInputElement>("mTarget").value.trim(),
+      };
+      const saved = await api("/api/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      for (const [key, id] of FIELDS) {
+        byId<HTMLInputElement>(id).value = saved[key] || "";
+      }
+      hint.textContent = "✔ 已保存";
+      toast("模型路径已保存");
+      document.dispatchEvent(new CustomEvent("config:changed"));
+      await loadInventory();
+    } catch (error) {
+      hint.textContent = `✘ ${(error as Error).message}`;
+      toast((error as Error).message, "fail");
+    }
+  }
+
+  async function loadInventory() {
+    try {
+      const data: Inventory = await api("/api/models");
+      rows = data.models;
+      roots = data.summary.roots;
+      const alive = new Set(rows.map((row) => row.rel_path));
+      for (const relPath of Array.from(selected)) {
+        if (!alive.has(relPath)) selected.delete(relPath);
+      }
+      const s = data.summary;
+      byId("sumSource").textContent = `${s.source_count} 个`;
+      byId("sumSourceBytes").textContent = fmtBytes(s.source_bytes);
+      byId("sumTarget").textContent = `${s.target_count} 个`;
+      byId("sumTargetBytes").textContent = fmtBytes(s.target_bytes);
+      byId("sumBoth").textContent = `${s.both_count} 个`;
+      byId("sumPending").textContent = `${s.pending_count} 个`;
+
+      const warnings: string[] = [];
+      if (!s.roots.comfyui.exists) warnings.push("ComfyUI 模型根目录不存在");
+      if (!s.roots.target.exists) warnings.push("迁移目标目录不存在");
+      if (s.roots.sd.path && !s.roots.sd.exists) {
+        warnings.push("SD 模型根目录不存在（可选）");
+      }
+      rootWarn.textContent = warnings.length ? `⚠ ${warnings.join("；")}` : "";
+
+      render();
+    } catch (error) {
+      tbody.innerHTML = `<tr><td colspan="5" class="empty">${escapeHtml(
+        (error as Error).message,
+      )}</td></tr>`;
+    }
+  }
+
+  function locationCell(row: ModelRow): string {
+    const present = [...row.present_in].sort(
+      (a, b) => ROOT_META[a].order - ROOT_META[b].order,
+    );
+    if (!present.length) return '<span class="muted mono">—</span>';
+    return present
+      .map((key) => {
+        const cls = key === "target" ? "target" : "source";
+        const info = roots[key];
+        return `<span class="badge ${cls}" title="${escapeHtml(
+          info.path,
+        )}">${ROOT_META[key].short}</span>`;
+      })
+      .join(" ");
+  }
+
+  function render() {
+    const query = search.value.trim().toLowerCase();
+    const status = filter.value;
+    const visible = rows.filter((row) => {
+      if (status && row.status !== status) return false;
+      if (!query) return true;
+      return (
+        row.name.toLowerCase().includes(query) ||
+        row.folder.toLowerCase().includes(query) ||
+        row.rel_path.toLowerCase().includes(query)
+      );
+    });
+
+    count.textContent = `${visible.length} / ${rows.length} 个文件`;
+    currentVisible = visible;
+    if (!visible.length) {
+      tbody.innerHTML =
+        '<tr><td colspan="5" class="empty">没有匹配的模型文件</td></tr>';
+      syncSelectionUI();
+      return;
+    }
+
+    const folders = new Map<string, ModelRow[]>();
+    for (const row of visible) {
+      const bucket = folders.get(row.folder);
+      if (bucket) bucket.push(row);
+      else folders.set(row.folder, [row]);
+    }
+    const folderNames = [...folders.keys()].sort((a, b) =>
+      a.localeCompare(b, "zh-CN"),
+    );
+
+    const html: string[] = [];
+    const autoExpand = Boolean(search.value.trim() || filter.value);
+    const expanded = groupsExpanded || autoExpand;
+    folderNames.forEach((folder, groupIndex) => {
+      const files = folders.get(folder)!;
+      files.sort((a, b) => {
+        if (sortSelect.value === "size_desc") {
+          return b.size - a.size || a.name.localeCompare(b.name, "zh-CN");
+        }
+        if (sortSelect.value === "size_asc") {
+          return a.size - b.size || a.name.localeCompare(b.name, "zh-CN");
+        }
+        return a.name.localeCompare(b.name, "zh-CN");
+      });
+      const unknown =
+        folder.includes("(未找到)") || folder.includes("__unknown__");
+      html.push(`
+        <tr class="group-row ${expanded ? "" : "collapsed"}" data-group="${groupIndex}" title="点击展开 / 收起">
+          <td colspan="5">
+            <div class="group-line">
+              <span class="group-caret">▾</span>
+              <span class="folder-label">📂 ${escapeHtml(folder)}/${
+                unknown ? ' <span class="badge unknown">类别未知</span>' : ""
+              }</span>
+              <span class="muted mono">${files.length} 个</span>
+            </div>
+          </td>
+        </tr>`);
+      files.forEach((row) => {
+        html.push(`
+          <tr class="file-row ${expanded ? "" : "hidden"}" data-group="${groupIndex}">
+            <td class="mono file-name" title="${escapeHtml(row.rel_path)}">
+              <label class="model-check-label">
+                <input type="checkbox" class="model-check"
+                  data-rel="${escapeHtml(row.rel_path)}"
+                  ${selected.has(row.rel_path) ? "checked" : ""} />
+                <span>${escapeHtml(row.name)}</span>
+              </label>
+            </td>
+            <td class="mono">${fmtBytes(row.size)}</td>
+            <td>${locationCell(row)}</td>
+            <td class="mono" title="被 ${row.workflow_count} 个工作流引用">${row.workflow_count}</td>
+            <td>
+              <button class="ghost small migrate-model-btn" type="button"
+                data-rel="${escapeHtml(row.rel_path)}">迁移</button>
+            </td>
+          </tr>`);
+      });
+    });
+    tbody.innerHTML = html.join("");
+    syncSelectionUI();
+    syncExpandButton();
+  }
+
+  function syncExpandButton() {
+    const groups = Array.from(
+      tbody.querySelectorAll<HTMLElement>(".group-row"),
+    );
+    const open = groups.filter(
+      (group) => !group.classList.contains("collapsed"),
+    ).length;
+    expandButton.disabled = groups.length === 0;
+    expandButton.textContent =
+      groups.length > 0 && open === groups.length ? "折叠全部" : "展开全部";
+  }
+
+  function syncSelectionUI() {
+    batchButton.disabled = selected.size === 0;
+    batchButton.textContent = `批量迁移（${selected.size}）`;
+    const checkedVisible = currentVisible.filter((row) =>
+      selected.has(row.rel_path),
+    ).length;
+    selectAll.disabled = currentVisible.length === 0;
+    selectAll.checked =
+      currentVisible.length > 0 && checkedVisible === currentVisible.length;
+    selectAll.indeterminate =
+      checkedVisible > 0 && checkedVisible < currentVisible.length;
+  }
+
+  tbody.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement;
+    const group = target.closest<HTMLElement>(".group-row");
+    if (group) {
+      const index = group.dataset.group;
+      const collapsed = group.classList.toggle("collapsed");
+      tbody
+        .querySelectorAll<HTMLElement>(`tr.file-row[data-group="${index}"]`)
+        .forEach((fileRow) => fileRow.classList.toggle("hidden", collapsed));
+      syncExpandButton();
+      return;
+    }
+    const button = target.closest<HTMLButtonElement>(
+      "button.migrate-model-btn",
+    );
+    if (!button) return;
+    const row = rows.find((item) => item.rel_path === button.dataset.rel);
+    if (row) openMigrateDialog([row]);
+  });
+
+  tbody.addEventListener("change", (event) => {
+    const checkbox = (event.target as HTMLElement).closest<HTMLInputElement>(
+      "input.model-check",
+    );
+    if (!checkbox) return;
+    const relPath = checkbox.dataset.rel;
+    if (!relPath) return;
+    if (checkbox.checked) selected.add(relPath);
+    else selected.delete(relPath);
+    syncSelectionUI();
+  });
+
+  selectAll.addEventListener("change", () => {
+    for (const row of currentVisible) {
+      if (selectAll.checked) selected.add(row.rel_path);
+      else selected.delete(row.rel_path);
+    }
+    const visible = new Set(currentVisible.map((row) => row.rel_path));
+    tbody
+      .querySelectorAll<HTMLInputElement>("input.model-check")
+      .forEach((input) => {
+        if (input.dataset.rel && visible.has(input.dataset.rel)) {
+          input.checked = selectAll.checked;
+        }
+      });
+    syncSelectionUI();
+  });
+
+  expandButton.addEventListener("click", () => {
+    const groups = Array.from(
+      tbody.querySelectorAll<HTMLElement>(".group-row"),
+    );
+    if (!groups.length) return;
+    const allOpen = groups.every(
+      (group) => !group.classList.contains("collapsed"),
+    );
+    groups.forEach((group) =>
+      group.classList.toggle("collapsed", allOpen),
+    );
+    tbody
+      .querySelectorAll<HTMLElement>("tr.file-row")
+      .forEach((fileRow) => fileRow.classList.toggle("hidden", allOpen));
+    groupsExpanded = !allOpen;
+    syncExpandButton();
+  });
+
+  batchButton.addEventListener("click", () => {
+    const chosen = rows.filter((row) => selected.has(row.rel_path));
+    if (!chosen.length) {
+      toast("请先勾选要迁移的模型", "fail");
+      return;
+    }
+    openMigrateDialog(chosen);
+  });
+
+  function openMigrateDialog(items: ModelRow[]) {
+    const isBatch = items.length > 1;
+    const available = (Object.keys(ROOT_META) as RootKey[])
+      .filter((key) => roots[key].path)
+      .sort((a, b) => ROOT_META[a].order - ROOT_META[b].order);
+    if (!available.length) {
+      toast("请先配置模型目录", "fail");
+      return;
+    }
+
+    const absent = available.find(
+      (key) =>
+        roots[key].exists &&
+        items.some((row) => !row.present_in.includes(key)),
+    );
+    const selectedDestination =
+      absent ??
+      available.find((key) => roots[key].exists) ??
+      available[0];
+
+    const options = available
+      .map((key) => {
+        const info = roots[key];
+        const presentCount = items.filter((row) =>
+          row.present_in.includes(key),
+        ).length;
+        const disabled = !info.exists;
+        const presentLabel = isBatch
+          ? `${presentCount} 个已存在`
+          : "已存在";
+        return `
+          <label class="dest-option ${disabled ? "disabled" : ""}">
+            <input type="radio" name="dest" value="${key}"
+              ${key === selectedDestination ? "checked" : ""} ${disabled ? "disabled" : ""} />
+            <span class="dest-label">${ROOT_META[key].label}</span>
+            <span class="mono muted dest-path">${escapeHtml(info.path)}</span>
+            ${presentCount ? `<span class="badge ok">${presentLabel}</span>` : ""}
+            ${!info.exists ? '<span class="badge pending">目录不存在</span>' : ""}
+          </label>`;
+      })
+      .join("");
+
+    const totalSize = items.reduce((sum, row) => sum + row.size, 0);
+    const usedCount = items.filter((row) => row.workflow_count > 0).length;
+    const usage = usedCount
+      ? isBatch
+        ? `其中 ${usedCount} 个被工作流引用。`
+        : `该模型被 ${items[0].workflow_count} 个工作流引用。`
+      : "";
+
+    const fileBlock = isBatch
+      ? `<div class="mono">${items.length} 个文件 · ${fmtBytes(totalSize)}</div>
+         <div class="batch-list">
+           ${items
+             .slice(0, 8)
+             .map((row) => `<div class="mono">${escapeHtml(row.name)}</div>`)
+             .join("")}
+           ${
+             items.length > 8
+               ? `<div class="muted mono">…还有 ${items.length - 8} 个</div>`
+               : ""
+           }
+         </div>`
+      : `<div class="mono">${escapeHtml(items[0].rel_path)}</div>
+         <div class="muted mono">${fmtBytes(items[0].size)} ${usage}</div>`;
+
+    const cutBlock = allowDelete
+      ? `<label class="cut-option">
+           <input type="checkbox" id="cutSource" />
+           <span>剪贴：迁移成功后删除源文件</span>
+         </label>
+         <p class="hint" id="cutHint">默认仅复制，源文件保留。${usage}</p>`
+      : `<p class="hint">未开启「允许删除源文件」，本次仅执行复制迁移。</p>`;
+    const { root, close } = openOverlay(`
+      <h3>${isBatch ? `迁移 ${items.length} 个模型` : "迁移模型"}</h3>
+      <div class="migrate-file">${fileBlock}</div>
+      <p class="hint">选择迁移到哪个位置：</p>
+      <div class="dest-list">${options}</div>
+      ${cutBlock}
+      <label class="cut-option hidden" id="overwriteOption">
+        <input type="checkbox" id="overwriteTarget" />
+        <span>覆盖目标端同名文件（内容不同时风险操作）</span>
+      </label>
+      <p class="hint hidden" id="overwriteWarn"></p>
+      <div class="space-info" id="spaceInfo">空间检查中…</div>
+      <div class="actions">
+        <button class="ghost" type="button" data-action="cancel">取消</button>
+        <button type="button" data-action="confirm">开始迁移</button>
+      </div>
+    `);
+
+    const cut = root.querySelector<HTMLInputElement>("#cutSource");
+    const cutHint = root.querySelector<HTMLElement>("#cutHint");
+    const overwriteOption = root.querySelector<HTMLElement>("#overwriteOption")!;
+    const overwriteCheckbox = root.querySelector<HTMLInputElement>("#overwriteTarget");
+    const overwriteWarn = root.querySelector<HTMLElement>("#overwriteWarn")!;
+    const spaceInfo = root.querySelector<HTMLElement>("#spaceInfo")!;
+    const confirmButton = root.querySelector<HTMLButtonElement>(
+      '[data-action="confirm"]',
+    )!;
+    const relPaths = items.map((row) => row.rel_path);
+    confirmButton.disabled = true;
+
+    async function updateSpace() {
+      const picked = root.querySelector<HTMLInputElement>(
+        'input[name="dest"]:checked',
+      );
+      if (!picked) return;
+      const destination = picked.value as RootKey;
+      spaceInfo.className = "space-info";
+      spaceInfo.textContent = "空间检查中…";
+      confirmButton.disabled = true;
+      const overwrite = Boolean(overwriteCheckbox?.checked);
+      try {
+        const plan = await api("/api/migrate/preflight", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ rel_paths: relPaths, destination, overwrite }),
+        });
+
+        const targetFiles = (plan.files || []).filter(
+          (file: any) => file.target_exists,
+        );
+        const risks: string[] = plan.risk_messages || [];
+        if (targetFiles.length) {
+          overwriteOption.classList.remove("hidden");
+          overwriteWarn.classList.remove("hidden");
+          overwriteWarn.classList.toggle("warn", Boolean(plan.requires_overwrite));
+          overwriteWarn.textContent = risks.length
+            ? risks.join("；")
+            : "目标已有相同文件；勾选覆盖可强制重写。";
+        } else {
+          overwriteOption.classList.add("hidden");
+          overwriteWarn.classList.add("hidden");
+          if (overwriteCheckbox) overwriteCheckbox.checked = false;
+        }
+
+        if (plan.ok && allowDelete && cut?.checked) {
+          const sameLocation = (plan.files || []).filter(
+            (file: any) => file.same_location,
+          ).length;
+          if (sameLocation > 0) {
+            spaceInfo.classList.add("fail");
+            spaceInfo.textContent =
+              "目标与源位置相同，剪贴不会删除源文件；请选择其他目标位置。";
+            confirmButton.disabled = true;
+            return;
+          }
+        }
+
+        if (plan.requires_overwrite && !overwrite) {
+          spaceInfo.classList.add("fail");
+          spaceInfo.textContent =
+            "目标端存在同名但内容不同的文件；勾选「覆盖」后才能继续。";
+          confirmButton.disabled = true;
+          return;
+        }
+
+        if (plan.ok) {
+          spaceInfo.classList.add("ok");
+          spaceInfo.textContent = `需要 ${fmtBytes(plan.need_bytes)} · 目标可用 ${fmtBytes(plan.free_bytes)}${
+            plan.need_bytes === 0 ? " · 目标已有相同文件，无需复制" : ""
+          }`;
+          confirmButton.disabled = false;
+        } else {
+          spaceInfo.classList.add("fail");
+          spaceInfo.textContent = `${plan.reason}（需要 ${fmtBytes(plan.need_bytes)}，可用 ${fmtBytes(plan.free_bytes)}）`;
+        }
+      } catch (error) {
+        spaceInfo.classList.add("fail");
+        spaceInfo.textContent = `空间检查失败：${(error as Error).message}`;
+      }
+    }
+
+    overwriteCheckbox?.addEventListener("change", () => {
+      void updateSpace();
+    });
+
+    root.querySelectorAll<HTMLInputElement>('input[name="dest"]').forEach((input) => {
+      input.addEventListener("change", () => void updateSpace());
+    });
+    void updateSpace();
+
+    cut?.addEventListener("change", () => {
+      if (!cut || !cutHint) return;
+      confirmButton.textContent = cut.checked ? "开始剪贴" : "开始迁移";
+      cutHint.classList.toggle("warn", cut.checked);
+      cutHint.textContent = cut.checked
+        ? `勾选后点击「开始剪贴」即会在复制成功后删除源文件，此操作不可撤销。${usage}`
+        : `默认仅复制，源文件保留。${usage}`;
+      void updateSpace();
+    });
+
+    root
+      .querySelector('[data-action="cancel"]')!
+      .addEventListener("click", close);
+
+    confirmButton.addEventListener("click", () => {
+      const picked = root.querySelector<HTMLInputElement>(
+        'input[name="dest"]:checked',
+      );
+      if (!picked) {
+        toast("请选择一个迁移位置", "fail");
+        return;
+      }
+      const destination = picked.value as RootKey;
+      if (!roots[destination]?.exists) {
+        toast("所选目录不存在，请先创建或更换位置", "fail");
+        return;
+      }
+      const move = allowDelete && Boolean(cut?.checked);
+      const overwrite = Boolean(overwriteCheckbox?.checked);
+      close();
+      void runMigration(items, destination, move, overwrite);
+    });
+  }
+
+  function showMigrationResults(results: any[]) {
+    const success = results.filter((item) => item.status === "success").length;
+    const rowsHtml = results
+      .map(
+        (item) => `
+        <label>
+          ${statusBadge(item.status)}
+          <span class="mono" style="flex:1;word-break:break-all">${escapeHtml(
+            item.rel_path,
+          )}</span>
+          <span class="muted" style="font-size:12px">${escapeHtml(
+            item.message,
+          )}</span>
+        </label>`,
+      )
+      .join("");
+    const { root } = openOverlay(`
+      <h3>迁移结果</h3>
+      <p class="hint">成功 ${success} 个，失败 ${results.length - success} 个。</p>
+      <div class="list">${rowsHtml}</div>
+      <div class="actions">
+        <button type="button" data-action="close">关闭</button>
+      </div>
+    `);
+    root
+      .querySelector('[data-action="close"]')!
+      .addEventListener("click", () => root.remove());
+  }
+
+  async function runMigration(
+    items: ModelRow[],
+    destination: RootKey,
+    move: boolean,
+    overwrite: boolean,
+  ) {
+    const relPaths = items.map((row) => row.rel_path);
+    const isBatch = items.length > 1;
+    try {
+      const outcome = await runMigrationTask({
+        rel_paths: relPaths,
+        destination,
+        move,
+        overwrite,
+      });
+      const results = outcome.results as any[];
+      if (outcome.status === "cancelled") {
+        toast("任务已取消，未完成的临时文件已清理", "fail");
+      } else if (outcome.status === "failed") {
+        toast(outcome.task.message || "迁移任务失败", "fail");
+      } else if (isBatch) {
+        const success = results.filter((item) => item.status === "success").length;
+        toast(
+          `迁移完成：成功 ${success} 个，失败 ${results.length - success} 个`,
+          success === results.length ? "ok" : "fail",
+        );
+        showMigrationResults(results);
+      } else if (results.length) {
+        toast(
+          results[0].message,
+          results[0].status === "success" ? "ok" : "fail",
+        );
+      }
+      selected.clear();
+      document.dispatchEvent(new CustomEvent("migrations:changed"));
+      document.dispatchEvent(new CustomEvent("workflows:changed"));
+      await loadInventory();
+    } catch (error) {
+      toast((error as Error).message, "fail");
+    }
+  }
+
+  byId("saveModelCfg").addEventListener("click", () => {
+    void saveConfig();
+  });
+  byId("refreshModels").addEventListener("click", () => {
+    void loadInventory();
+  });
+  function syncClearButton() {
+    clearSearch.classList.toggle("hidden", search.value.length === 0);
+  }
+
+  search.addEventListener("input", () => {
+    render();
+    syncClearButton();
+  });
+  clearSearch.addEventListener("click", () => {
+    search.value = "";
+    render();
+    syncClearButton();
+    search.focus();
+  });
+  filter.addEventListener("change", render);
+  sortSelect.addEventListener("change", render);
+
+  document.addEventListener("config:changed", () => {
+    void loadConfig();
+  });
+
+  document.addEventListener("tab:activated", (event) => {
+    if ((event as CustomEvent<{ id: string }>).detail.id === "models") {
+      void loadConfig();
+      void loadInventory();
+    }
+  });
+
+  void loadConfig();
+  void loadInventory();
+  syncClearButton();
+</script>
